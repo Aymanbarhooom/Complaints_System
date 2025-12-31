@@ -1,5 +1,6 @@
 <?php
 
+use Illuminate\Support\Facades\Log;
 use Monolog\Handler\NullHandler;
 use Monolog\Handler\StreamHandler;
 use Monolog\Handler\SyslogUdpHandler;
@@ -50,6 +51,8 @@ return [
     |                    "custom", "stack"
     |
     */
+
+
 
     'channels' => [
         'stack' => [
@@ -128,4 +131,26 @@ return [
         ],
     ],
 
+    'system' => [
+        'driver' => 'daily',
+        'path' => storage_path('logs/system.log'),
+        'level' => 'info',
+        'days' => 14,
+    ],
+    
+    'performance' => [
+        'driver' => 'daily',
+        'path' => storage_path('logs/performance.log'),
+        'level' => 'debug',
+    ],
+    
+    'security' => [
+        'driver' => 'daily',
+        'path' => storage_path('logs/security.log'),
+        'level' => 'warning',
+    ],
+
 ];
+Log::channel('system')->info('User logged in', ['user_id' => $user->id]);
+Log::channel('performance')->debug('Slow query', ['duration' => $duration]);
+Log::channel('security')->warning('Failed login attempt', ['ip' => $ip]);

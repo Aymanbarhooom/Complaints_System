@@ -4,70 +4,78 @@ namespace App\Http\Controllers;
 
 use App\Models\User;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Hash;
-
+use Illuminate\Validation\ValidationException;
 class AuthController extends Controller
 {
 
-    public function register(Request $request)
+    public function registerCitizen(Request $request)
     {
-        $validated = $request->validate([
-            'name'       => 'required|string',
-            'email'      => 'required|email|unique:users,email',
-            'password'   => 'required|min:6',
-            'role'       => 'required|in:citizen,employee,admin',
-            'agency_id'  => 'nullable|exists:government_agencies,id',
+        $data = $request->validate([
+            'firstName' => 'required|string',
+            'lastName'  => 'required|string',
+            'email'     => 'required|email|unique:users',
+            'password'  => 'required|min:6',
+             'cardId'    => 'nullable|string',
+            'birthday'  => 'nullable|date',
         ]);
 
-        $validated['password'] = Hash::make($validated['password']);
-
-        $user = User::create($validated);
+        $user = User::create([
+            'firstName' => $data['firstName'],
+            'lastName'  => $data['lastName'],
+            'email'     => $data['email'],
+            'password'  => Hash::make($data['password']),
+            'role'      => 'citizen',
+            'cardId'    => $data['cardId'] ?? null,
+            'birthday'  => $data['birthday'] ?? null,
+        ]);
 
         $token = $user->createToken('auth_token')->plainTextToken;
 
         return response()->json([
-            'message' => 'Registered successfully',
+            'message' => 'Register successful',
             'user'    => $user,
             'token'   => $token,
+            'status'  => 201
         ], 201);
     }
-
 
 
     public function login(Request $request)
     {
         $credentials = $request->validate([
             'email'    => 'required|email',
-            'password' => 'required'
+            'password' => 'required',
         ]);
 
-        $user = User::where('email', $credentials['email'])->first();
-
-        if (!$user || !Hash::check($credentials['password'], $user->password)) {
+        if (!Auth::attempt($credentials)) {
             return response()->json([
-                'message' => 'Invalid email or password'
+                'message' => 'Invalid credentials',
+                'status'  => 401
             ], 401);
         }
 
+        /** @var \App\Models\User $user */ // This is a PHPDoc hint for your IDE
+        $user = Auth::user();
         $token = $user->createToken('auth_token')->plainTextToken;
 
         return response()->json([
-            'message' => 'Logged in successfully',
+            'message' => 'Login successful',
             'user'    => $user,
-            'token'   => $token
-        ]);
+            'token'   => $token,
+            'status'  => 201
+        ], 201);
     }
 
 
-    // ===========================
-    // Logout
-    // ===========================
     public function logout(Request $request)
     {
-        $request->user()->tokens()->delete();
+        $request->user()->currentAccessToken()->delete();
 
         return response()->json([
-            'message' => 'Logged out successfully'
+            'message' => 'Logout successful',
+            'status'  => 200
         ]);
     }
 }

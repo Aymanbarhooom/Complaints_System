@@ -1,15 +1,30 @@
 <?php
 
 namespace App\Http\Controllers;
+
 namespace App\Http\Controllers;
 
+use App\DAO\Interfaces\ComplaintDAOInterface;
 use App\Models\Complaint;
-use App\Models\ComplaintHistory;
+use App\Models\Notification;
+use App\Models\SystemLog;
+use App\Models\User;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Storage;
 
 class ComplaintController extends Controller
 {
-     public function allComplaints()
+
+    protected ComplaintDAOInterface $complaintDAO;
+
+    public function __construct(ComplaintDAOInterface $complaintDAO)
+    {
+        $this->complaintDAO = $complaintDAO;
+    }
+
+    public function allComplaints()
     {
         if (auth()->user()->role !== 'admin') {
             return response()->json(['error' => 'Unauthorized'], 403);
@@ -17,6 +32,9 @@ class ComplaintController extends Controller
 
         return response()->json(Complaint::all());
     }
+
+
+
     // المواطن ينشئ شكوى جديدة
     public function store(Request $request)
     {
@@ -24,38 +42,119 @@ class ComplaintController extends Controller
             return response()->json(['error' => 'Unauthorized'], 403);
         }
 
+        $user = auth()->user();
+
         $validated = $request->validate([
             'agency_id' => 'required|exists:government_agencies,id',
             'description' => 'required|string',
             'location' => 'nullable|string',
-            'attachments' => 'nullable|array',
+            'attachments' => 'nullable|array|max:5',
             'attachments.*' => 'file|mimes:jpeg,png,jpg,gif,pdf,doc,docx,xlsx',
         ]);
 
-        // Handle file uploads
-        $attachments = [];
-        if ($request->hasFile('attachments')) {
-            foreach ($request->file('attachments') as $file) {
-                $path = $file->store('complaints', 'public');
-                $attachments[] = [
-                    'name' => $file->getClientOriginalName(),
-                    'path' => $path,
-                    'type' => $file->getClientMimeType(),
-                    'size' => $file->getSize(),
-                ];
+        try {
+            // =============================
+            // بداية Transaction
+            // =============================
+            $complaint = DB::transaction(function () use ($request, $validated) {
+
+                // 1️⃣ إنشاء الشكوى
+                $complaint = Complaint::create([
+                    'agency_id' => $validated['agency_id'],
+                    'user_id' => auth()->id(),
+                    'status' => 'new',
+                    'description' => $validated['description'],
+                    'location' => $validated['location'] ?? null,
+                    // reference_number سيتم توليده في Observer
+                ]);
+
+                // 2️⃣ رفع الملفات المرفقة
+                $attachmentsData = [];
+                if ($request->hasFile('attachments')) {
+                    foreach ($request->file('attachments') as $file) {
+                        // رفع الملف
+                        $path = $file->store('complaints/' . $complaint->id, 'public');
+
+                        $attachmentsData[] = [
+                            'name' => $file->getClientOriginalName(),
+                            'path' => $path,
+                            'type' => $file->getClientMimeType(),
+                            'size' => $file->getSize(),
+                        ];
+                    }
+
+                    // حفظ المرفقات في الشكوى
+                    $complaint->update(['attachments' => $attachmentsData]);
+                }
+
+                // 3️⃣ إنشاء إشعار لموظفي الجهة
+                $employees = User::where('agency_id', $validated['agency_id'])
+                    ->where('role', 'employee')
+                    ->get();
+
+                foreach ($employees as $employee) {
+                    Notification::create([
+                        'user_id' => $employee->id,
+                        'complaint_id' => $complaint->id,
+                        'title' => 'New Complaint Received',
+                        'message' => "New complaint #{$complaint->reference_number} has been submitted.",
+                        'is_read' => false,
+                    ]);
+                }
+
+                // 4️⃣ إرسال إشعار للمواطن بالتأكيد
+                Notification::create([
+                    'user_id' => auth()->id(),
+                    'complaint_id' => $complaint->id,
+                    'title' => 'Complaint Submitted Successfully',
+                    'message' => "Your complaint has been submitted with reference number: {$complaint->reference_number}",
+                    'is_read' => false,
+                ]);
+
+                // ✅ إذا وصلنا هنا = كل شي نجح
+                return $complaint;
+            });
+            // =============================
+            // نهاية Transaction
+            // =============================
+
+            // Log النجاح
+            Log::info('Complaint created successfully', [
+                'complaint_id' => $complaint->id,
+                'reference' => $complaint->reference_number,
+                'user_id' => auth()->id(),
+            ]);
+
+            // إرجاع النتيجة
+            return response()->json([
+                'message' => 'Complaint submitted successfully',
+                'complaint' => $complaint->load('agency:id,name'),
+                'reference_number' => $complaint->reference_number,
+                'status' => 201
+            ], 201);
+        } catch (\Exception $e) {
+            // ❌ Rollback تلقائي - كل شي يرجع كأنو ما صار
+
+            // حذف الملفات المرفوعة (إذا وصلت لهذه المرحلة)
+            if (isset($attachmentsData)) {
+                foreach ($attachmentsData as $attachment) {
+                    Storage::disk('public')->delete($attachment['path']);
+                }
             }
+
+            // Log الخطأ
+            Log::error('Failed to create complaint', [
+                'error' => $e->getMessage(),
+                'trace' => $e->getTraceAsString(),
+                'user_id' => auth()->id(),
+            ]);
+
+            return response()->json([
+                'message' => 'Failed to submit complaint. Please try again.',
+                'error' => config('app.debug') ? $e->getMessage() : 'Internal server error',
+                'status' => 500
+            ], 500);
         }
-
-        $complaint = Complaint::create([
-            'citizen_id' => auth()->id(),
-            'agency_id' => $validated['agency_id'],
-            'description' => $validated['description'],
-            'location' => $validated['location'] ?? null,
-            'attachments' => count($attachments) > 0 ? $attachments : null,
-            'reference_number' => strtoupper(uniqid('CMP-')),
-        ]);
-
-        return response()->json(['message' => 'Complaint submitted', 'complaint' => $complaint], 201);
     }
 
     // عرض الشكاوى حسب الدور
@@ -64,7 +163,7 @@ class ComplaintController extends Controller
         $user = auth()->user();
 
         if ($user->role === 'citizen') {
-            $complaints = Complaint::where('citizen_id', $user->id)->get();
+            $complaints = Complaint::where('user_id', $user->id)->get();
         } elseif ($user->role === 'employee') {
             $complaints = Complaint::where('agency_id', $user->agency_id)->get();
         } else {
@@ -74,69 +173,85 @@ class ComplaintController extends Controller
         return response()->json($complaints);
     }
 
-    // فتح شكوى للمعالجة (كما اتفقنا)
-    public function open($id)
+    public function assignToMe($id)
     {
         $user = auth()->user();
-        $complaint = Complaint::findOrFail($id);
 
         if ($user->role !== 'employee') {
             return response()->json(['error' => 'Unauthorized'], 403);
         }
 
-        if ($complaint->agency_id !== $user->agency_id) {
-            return response()->json(['error' => 'Not your agency'], 403);
+        try {
+            DB::transaction(function () use ($id, $user) {
+                $complaint = $this->complaintDAO->findForUpdate($id);
+                $this->complaintDAO->assignToEmployee($complaint, $user);
+
+                SystemLog::create([
+                    'user_id' => $user->id,
+                    'action' => 'assigned_complaint',
+                    'ip_address' => request()->ip(),
+                ]);
+            });
+
+            return response()->json(['message' => 'Complaint assigned'], 200);
+        } catch (\Exception $e) {
+            return response()->json(['message' => $e->getMessage()], 409);
         }
-
-        if ($complaint->status === 'new') {
-            $old = $complaint->status;
-            $complaint->update([
-                'status' => 'in_progress',
-            ]);
-
-            ComplaintHistory::create([
-                'complaint_id' => $complaint->id,
-                'user_id' => $user->id,
-                'action' => 'status_changed',
-                'old_value' => $old,
-                'new_value' => 'in_progress',
-            ]);
-
-            return response()->json(['message' => 'Complaint opened for processing']);
-        }
-
-        if ($complaint->status === 'in_progress') {
-            return response()->json(['message' => 'Complaint already under processing'], 423);
-        }
-
-        return response()->json(['message' => 'Complaint closed, read-only']);
     }
 
-    // تعديل الحالة إلى منجزة أو مرفوضة
+
+    public function release($id)
+    {
+        $user = auth()->user();
+
+        try {
+            DB::transaction(function () use ($id, $user) {
+                $complaint = $this->complaintDAO->findForUpdate($id);
+                $this->complaintDAO->release($complaint, $user);
+
+                SystemLog::create([
+                    'user_id' => $user->id,
+                    'action' => 'released_complaint',
+                    'ip_address' => request()->ip(),
+                ]);
+            });
+
+            return response()->json(['message' => 'Complaint released'], 200);
+        } catch (\Exception $e) {
+            return response()->json(['message' => $e->getMessage()], 409);
+        }
+    } 
+
     public function updateStatus(Request $request, $id)
-    {
-        $user = auth()->user();
-        $complaint = Complaint::findOrFail($id);
+{
+    $user = auth()->user();
 
-        if ($user->role !== 'employee') {
-            return response()->json(['error' => 'Unauthorized'], 403);
-        }
+    $validated = $request->validate([
+        'status' => 'required|in:new,in_progress,resolved,rejected'
+    ]);
 
-        $validated = $request->validate([
-            'status' => 'required|in:resolved,rejected,in_progress,new',
-        ]);
+    try {
+        DB::transaction(function () use ($id, $user, $validated) {
+            $complaint = $this->complaintDAO->findForUpdate($id);
+            $this->complaintDAO->updateStatus(
+                $complaint,
+                $user,
+                $validated['status']
+            );
 
-        $old = $complaint->status;
-        $complaint->update(['status' => $validated['status']]);
+            SystemLog::create([
+                'user_id' => $user->id,
+                'action' => 'updated_status',
+                'ip_address' => request()->ip(),
+            ]);
+        });
 
-        ComplaintHistory::create([
-            'complaint_id' => $complaint->id,
-            'user_id' => $user->id,
-            'action' => 'status_changed',
-            'old_value' => $old,
-            'new_value' => $validated['status'],
-        ]);
+        return response()->json(['message' => 'Status updated'], 200);
 
-        return response()->json(['message' => 'Status updated']);
+    } catch (\Exception $e) {
+        return response()->json(['message' => $e->getMessage()], 409);
     }
+}
+
+
 }

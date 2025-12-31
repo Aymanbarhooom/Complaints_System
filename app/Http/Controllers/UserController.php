@@ -18,24 +18,38 @@ class UserController extends Controller
         return response()->json(User::all());
     }
 
-    public function store(Request $request)
+    public function addEmployee(Request $request)
     {
         if (auth()->user()->role !== 'admin') {
             return response()->json(['error' => 'Unauthorized'], 403);
         }
 
-        $validated = $request->validate([
-            'name' => 'required',
-            'email' => 'required|email|unique:users',
-            'password' => 'required|min:6',
-            'role' => 'required|in:citizen,employee,admin',
-            'agency_id' => 'nullable|exists:government_agencies,id',
+        $data = $request->validate([
+            'firstName' => 'required|string',
+            'lastName'  => 'required|string',
+            'email'     => 'required|email|unique:users',
+            'password'  => 'required|min:6',
+            'agency_id' => 'required|exists:government_agencies,id',
+            'cardId'    => 'nullable|string',
+            'birthday'  => 'nullable|date',
         ]);
 
-        $validated['password'] = Hash::make($validated['password']);
-        $user = User::create($validated);
+        $employee = User::create([
+            'firstName' => $data['firstName'],
+            'lastName'  => $data['lastName'],
+            'email'     => $data['email'],
+            'password'  => Hash::make($data['password']),
+            'role'      => 'employee',
+            'agency_id' => $data['agency_id'],
+            'cardId'    => $data['cardId'] ?? null,
+            'birthday'  => $data['birthday'] ?? null,
+        ]);
 
-        return response()->json(['message' => 'User created', 'user' => $user]);
+        return response()->json([
+            'message' => 'Employee created successfully',
+            'user'    => $employee,
+            'status'  => 201
+        ], 201);
     }
 
      public function remove(Request $request, $id)

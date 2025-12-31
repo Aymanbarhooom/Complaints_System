@@ -11,17 +11,26 @@ return new class extends Migration
         Schema::create('users', function (Blueprint $table) {
             $table->id();
 
-            $table->string('name');
+             $table->string('firstName')->nullable();
+            $table->string('lastName')->nullable();
+             $table->string('cardId')->unique()->nullable();
+            $table->date('birthday')->nullable();
             $table->string('email')->unique();
             $table->string('password');
             $table->enum('role', ['citizen', 'employee', 'admin'])->default('citizen');
-            // اختيارية للموظفين فقط
             $table->foreignId('agency_id')
                   ->nullable()
                   ->constrained('government_agencies')
                   ->nullOnDelete();
 
             $table->timestamps();
+            /** $table->string('employee_code')->unique(); 
+            $table->foreignId('department_id')
+            ->constrained('departments')   
+            ->onDelete('restrict');
+            $table->boolean('is_department_manager')
+            ->default(false);
+            $table->timestamps(); */
         });
     }
 
